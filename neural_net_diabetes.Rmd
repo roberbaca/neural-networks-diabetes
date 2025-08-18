@@ -1,0 +1,463 @@
+---
+title: "Neural Networks Diabetes"
+author: "Roberto Baca"
+date: "15/08/2025"
+output: 
+  prettydoc::html_pretty:
+          theme: hpstr
+---
+
+# Diabetes Prediction Using Neural Networks
+
+## Introduction
+
+The PimaIndiansDiabetes dataset (from the mlbench package) contains medical data from Pima Indian women aged 21 and older, collected by the National Institute of Diabetes and Digestive and Kidney Diseases.
+
+**The goal is to predict whether a patient has diabetes based on certain clinical measurements.**.
+
+The dataset includes 768 records and 9 columns:
+
+* pregnant: number of pregnancies
+
+* glucose: plasma glucose concentration during a tolerance test
+
+* pressure: diastolic blood pressure (mm Hg)
+
+* triceps: triceps skinfold thickness (mm)
+
+* insulin: 2-hour serum insulin level (µU/ml)
+
+* mass: body mass index (BMI)
+
+* pedigree: genetic probability (diabetes pedigree function)
+
+* age: age (years)
+
+* diabetes: target variable, with values "pos" (positive) or "neg" (negative)
+
+An **economic analysis** will also be performed, assuming a simplified scenario:
+
+* The cost of a False Negative (a person with diabetes who is NOT diagnosed) is high, as it poses serious health risks. We assume a cost of USD 1,000 per False Negative (medical expenses, complications, etc.).
+
+* The cost of a False Positive (a healthy person incorrectly diagnosed with diabetes) is lower but not negligible. We assume a cost of USD 100 per False Positive (medical visits, additional tests, etc.).
+
+From the confusion matrix, we can calculate:
+
+* FN = False Negatives
+
+* FP = False Positives
+
+## Loading Libraries and Dataset
+
+```{r warning= FALSE, message=FALSE}
+# libraries
+library(nnet)
+library(caret)
+library(neuralnet)
+library(pROC)
+library(ggplot2)
+library(tidyverse)
+```
+
+
+```{r warning=FALSE}
+# dataset
+library(mlbench) 
+data("PimaIndiansDiabetes2")
+df <- PimaIndiansDiabetes2
+
+str(df)
+```
+
+```{r}
+# drop na
+df<- na.omit(df)
+summary(df)
+```
+
+
+```{r}
+# Keep the original labels and fix the order: "pos" first
+df$diabetes <- factor(df$diabetes, levels = c("pos", "neg"))
+prop.table(table(df$diabetes))
+```
+
+## Train-Test Split
+
+```{r}
+# split
+set.seed(123)
+train_index <- createDataPartition(df$diabetes, p=0.7, list=FALSE)
+train <- df[train_index, ]
+test  <- df[-train_index, ]
+
+y_test  <- test$diabetes
+
+```
+
+## Class Balancing with ROSE
+
+Since the dataset is imbalanced, we will apply the ROSE method.
+
+ROSE (Random OverSampling Examples) is a technique that generates synthetic examples to balance the dataset. Instead of cloning existing data, it creates new and diverse samples.
+
+
+```{r warning=FALSE, message=FALSE}
+# Apply ROSE to the training set for balancing
+
+#install.packages("ROSE")
+library(ROSE)
+
+mayoritarios <- sum(train$diabetes == "neg")    
+
+train_rose <- ROSE(diabetes ~ ., data=train, N = 2 * mayoritarios, seed=123)$data
+
+table(train_rose$diabetes)
+
+
+```
+
+## Feature Scaling
+
+Important: scaling is performed using the training set parameters to avoid data leakage from the test set.
+
+```{r}
+# scale the balanced training set
+preProc <- preProcess(train_rose[ ,-9], method = c("center", "scale"))
+train_rose_sc <- predict(preProc, train_rose %>% select(-diabetes))
+train_rose_sc$diabetes <- train_rose$diabetes 
+
+# scale the test set using the same training set parameters
+test_sc <- predict(preProc, test %>% select(-diabetes))
+test_sc$diabetes <- test$diabetes
+
+str(test_sc)
+```
+
+# Modeling
+
+## 1. Simple Neural Network without hyperparameter tuning
+
+```{r}
+set.seed(123)
+
+nn_simple <- nnet(diabetes ~ ., data = train_rose_sc, size = 4, decay = 0.01, maxit = 200, trace=FALSE)
+
+# Predictions as the probability of the positive class ("pos")
+pred_simple <- predict(nn_simple, test_sc, type = "raw")
+
+# Convert to class labels using a 0.5 threshold (pos/neg)
+pred_simple_clase <- factor(ifelse(pred_simple >= 0.5, "pos", "neg"), levels = levels(test_sc$diabetes))
+
+conf_simple <- confusionMatrix(pred_simple_clase, test_sc$diabetes,positive = "pos")
+conf_simple
+```
+
+
+```{r message=FALSE}
+library(knitr)
+
+fn_simple <- conf_simple$table[2,1]
+fp_simple <- conf_simple$table[1,2]
+cost_simple <- fn_simple * 1000 + fp_simple *100
+
+# Economic Analysis of Simple Neural Network
+# Create a data frame with the results
+resumen_modelos <- data.frame(
+  Model = c("Simple Neural Network"),
+  FN = c(fn_simple),
+  FP = c(fp_simple),
+  Cost_USD = c(cost_simple)
+)
+
+kable(resumen_modelos, caption = "Simple Neural Network – Estimated Costs")
+```
+
+## Variable Importance
+
+We can assess the importance of variables in the neural network using nnet models:
+
+* olden() → strength + sign of contribution
+
+* garson() → normalized relative importance, magnitude only
+
+
+**Olden** shows the strength and sign of each input variable’s contribution to the model’s prediction. Each bar indicates whether a variable has a positive or negative effect on the probability of the output being "pos". This helps understand how each feature directly affects the network’s decision.
+
+**Garson** calculates the relative importance of each variable, normalized between 0 and 1. It does not indicate the sign, only how influential each input is for the prediction. It is useful for identifying the most relevant variables regardless of the direction of their effect.
+
+```{r warning=FALSE}
+# install.packages("NeuralNetTools")
+library(NeuralNetTools)
+
+# Strength and Sign of Inputs
+olden(nn_simple, bar_plot = TRUE)
+
+# Relative Importance of Variables
+garson(nn_simple, bar_plot = TRUE)  
+
+```
+
+## 2. Neural Network with Hyperparameter Tuning
+
+For the neural network with hyperparameters, a grid search combined with 5-fold cross-validation was applied, optimizing the ROC metric to select the best combination of neurons and regularization.
+
+In cross-validation, the data is split into multiple parts to repeatedly train and validate the model, aiming to find a stable and generalizable solution.
+
+```{r}
+# cross-validation
+ctrl <- trainControl(
+  method = "cv",
+  number = 5,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,  
+  savePredictions = "final"
+)
+
+# Hyperparameter Grid
+grid <- expand.grid(
+  size  = c(3, 5, 7),           # Neurons in the single hidden layer of the nnet model
+  decay = c(0.001, 0.01, 0.1)   # Regularization
+)
+```
+
+
+```{r}
+set.seed(123)
+
+nn_hiper <- caret::train(diabetes ~ .,
+                     data = train_rose_sc,
+                     method = "nnet",
+                     metric = "ROC",             
+                     trControl = ctrl, # control
+                     tuneGrid = grid, # Hyperparameters
+                     MaxNWts = 2000, # Maximum Number of Weights
+                     maxit = 300, # Maximum Iterations
+                     trace = FALSE # Sigmoid Activation
+  
+)
+
+```
+
+
+```{r}
+# Predictions as the probability of the positive class ("pos")
+pred_hiper_prob <- predict(nn_hiper, newdata = test_sc, type = "prob")[, "pos"]
+
+# Convert to class labels using a 0.5 threshold
+pred_hiper_clase <- factor(ifelse(pred_hiper_prob >= 0.5, "pos", "neg"),levels = levels(test_sc$diabetes))
+
+conf_hiper <- confusionMatrix(pred_hiper_clase, test_sc$diabetes, positive = "pos")
+conf_hiper
+```
+
+```{r}
+library(knitr)
+fn_hiper <- conf_hiper$table[2,1]
+fp_hiper <- conf_hiper$table[1,2]
+cost_hiper <- fn_hiper * 1000 + fp_hiper *100
+
+resumen_hiper <- data.frame(
+  Model = "Neural Network with Hyperparameters",
+  FN = fn_hiper,
+  FP = fp_hiper,
+  Cost_USD = cost_hiper
+)
+
+
+kable(resumen_hiper, caption = "Neural Network with Hyperparameters – Estimated Costs")
+```
+
+# 3. Multilayer Perceptron (MLP) with neuralnet
+
+The multilayer perceptron (MLP) with neuralnet is a neural network with multiple hidden layers trained directly on the scaled data, where the number of neurons per layer is specified manually, and a sigmoid function is used for the output.
+
+
+
+```{r}
+#install.packages("neuralnet")
+library(neuralnet)
+
+# Convert diabetes to numeric 0/1
+train_nn <- train_rose_sc
+train_nn$diabetes <- ifelse(train_nn$diabetes == "pos", 1, 0)
+
+test_nn <- test_sc
+test_nn$diabetes <- ifelse(test_nn$diabetes == "pos", 1, 0)
+
+# Create a dynamic formula
+form <- as.formula("diabetes ~ .")
+
+# Train the network with multiple hidden layers (5 and 3 neurons)
+set.seed(123)
+
+modelo_nn <- neuralnet(
+  formula = form,
+  data = train_nn,
+  hidden = c(4,2), # Two hidden layers
+  linear.output = FALSE, # Sigmoid output
+  lifesign = "minimal", # Reduce console output
+  threshold = 0.01,
+  stepmax = 1e6 # Maximum number of steps
+)
+
+```
+```{r plot_neuralnet, fig.width=8, fig.height=6, echo=TRUE, warning=FALSE, message=FALSE}
+plot(modelo_nn,
+           rep="best",         # Better node layout
+           show.weights=TRUE,  # Display connection weights
+           show.values=TRUE,   # Display neuron values
+           col.hidden="blue",
+           col.hidden.synapse="black",
+           col.intercept="red",
+           information=FALSE   # Avoid extra text
+           )
+```
+
+The plot generated by plot(modelo_nn) in neuralnet shows the structure of the trained neural network:
+
+* Nodes (circles): represent the neurons in each layer.
+
+* The first layer corresponds to the inputs (features).
+
+* The intermediate layers are the hidden layers.
+
+* The last layer is the output (diabetes prediction 0/1).
+
+* Connections (lines): represent the synaptic weights between neurons.
+
+* Nodes with a value of 1 in the plot are dummy nodes, representing the bias of the neurons in the network. This bias allows the neuron to activate even if all inputs are 0, or to adjust its activation threshold. It is essential for the network to learn correctly.
+
+**This plot allows us to visualize how each input contributes to the output through the hidden layers and how the weights are distributed in the network**
+
+```{r}
+# Predictions
+pred_nn <- neuralnet::compute(modelo_nn, test_nn[, -9])$net.result
+pred_clases <- ifelse(pred_nn > 0.5, 1, 0)
+
+# Confusion Matrix
+conf_neural <- confusionMatrix(
+  factor(pred_clases, levels = c(0,1)),
+  factor(test_nn$diabetes, levels = c(0,1)),
+  positive = "1"
+)
+conf_neural
+
+```
+
+
+
+
+```{r}
+# Economic Analysis of Multilayer Perceptron (MLP)
+fn_multi <- conf_neural$table[2,1]
+fp_multi <- conf_neural$table[1,2]
+cost_multi <- fn_multi * 1000 + fp_multi *100
+
+# reate a data frame for the MLP results
+resumen_multi <- data.frame(
+  Model = "Multilayer Perceptron (MLP)",
+  FN = fn_multi,
+  FP = fp_multi,
+  Cost_USD = cost_multi
+)
+
+# Mostrar tabla
+kable(resumen_multi, caption = "Multilayer Neural Network – Estimated Costs")
+```
+
+
+## Model Comparison
+
+## ROC Curves
+
+The ROC curve (Receiver Operating Characteristic) represents the relationship between the true positive rate (sensitivity) and the false positive rate (1 − specificity) across different classification thresholds. It allows evaluating a model’s ability to correctly distinguish between positive and negative classes, regardless of a specific threshold.
+
+
+```{r message=FALSE}
+# ROC Curves
+roc_simple <- roc(y_test, as.vector(pred_simple))
+roc_hiper  <- roc(y_test, as.vector(pred_hiper_prob))
+roc_multi <- roc(test_nn$diabetes, as.vector(pred_nn))
+
+
+# Plot ROC Curves Together
+plot(roc_simple, col="steelblue", main="ROC Curves", lwd=2)
+lines(roc_hiper, col="red", lwd=2)
+lines(roc_multi, col="darkgreen", lwd=2)
+legend("bottomright", legend=c("Simple","Hyperparameters","Multilayer"),
+       col=c("steelblue","red","darkgreen"), lwd=2)
+```
+## AUC
+
+The Area Under the Curve (AUC) summarizes the model’s discriminative ability:
+
+* 0.5 → model has no discriminative power (random).
+
+* 1.0 → perfect model.
+
+```{r}
+library(pROC)
+
+# Calculate AUC and 95% CI for each model
+auc_simple <- auc(roc_simple)
+ci_simple <- ci.auc(roc_simple)
+
+auc_hiper <- auc(roc_hiper)
+ci_hiper <- ci.auc(roc_hiper)
+
+auc_multi <- auc(roc_multi)
+ci_multi <- ci.auc(roc_multi)
+
+# Create a data frame
+tabla_auc <- data.frame(
+  Model = c("Simple", "Hyperparameters", "Multilayer"),
+  AUC = c(auc_simple, auc_hiper, auc_multi),
+  CI_Lower = c(ci_simple[1], ci_hiper[1], ci_multi[1]),
+  CI_Upper = c(ci_simple[3], ci_hiper[3], ci_multi[3])
+)
+
+# table
+kable(tabla_auc, digits = 3, caption = "AUC and Confidence Interval per Model")
+```
+
+The confidence intervals (95% CI) demonstrate statistical robustness, as they do not include 0.5, confirming that all models perform significantly better than a random classifier.
+
+
+## Economic Comparison
+
+```{r message=FALSE}
+# Create a data frame with the results of each model
+comparacion_modelos <- data.frame(
+  Model = c("Simple", "Hyperparameters", "Multilayer"),
+  FN = c(fn_simple, fn_hiper, fn_multi),
+  FP = c(fp_simple, fp_hiper, fp_multi),
+  Cost_USD = c(cost_simple, cost_hiper, cost_multi),
+  Sensitivity = c(conf_simple$byClass["Sensitivity"], 
+                   conf_hiper$byClass["Sensitivity"], 
+                   conf_neural$byClass["Sensitivity"]),
+  Specificity = c(conf_simple$byClass["Specificity"], 
+                    conf_hiper$byClass["Specificity"], 
+                    conf_neural$byClass["Specificity"]),
+  Accuracy = c(conf_simple$overall["Accuracy"], 
+               conf_hiper$overall["Accuracy"], 
+               conf_neural$overall["Accuracy"]),
+  stringsAsFactors = FALSE
+)
+
+# Calculate AUC
+library(pROC)
+roc_simple <- roc(y_test, as.vector(pred_simple))
+roc_hiper  <- roc(y_test, as.vector(pred_hiper_prob))
+roc_multi  <- roc(y_test, as.vector(pred_nn))
+
+comparacion_modelos$AUC <- c(auc(roc_simple), auc(roc_hiper), auc(roc_multi))
+
+# table
+kable(comparacion_modelos)
+
+```
+
+# Conclusions
+
+From a medical and economic perspective, the Simple Neural Network is the most balanced option, as it has the lowest number of false negatives (better protecting patients with diabetes) and the lowest total cost. Additionally, it demonstrates good sensitivity and AUC.
