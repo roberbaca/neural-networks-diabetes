@@ -35,7 +35,7 @@ The workflow covers:
 
 ## Project Report
 
-You can view the full analysis here: [Neural Networks Diabetes]([link-to-your-prettydoc-html](https://roberbaca.github.io/neural-networks-diabetes/))
+You can view the full analysis here: [Neural Networks Diabetes](https://roberbaca.github.io/neural-networks-diabetes/)
 
 ## How to Run
 
@@ -45,6 +45,6 @@ You can view the full analysis here: [Neural Networks Diabetes]([link-to-your-pr
 
 ## Links
 
-- Kaggle Notebook: [https://www.kaggle.com/code/robertonicolsbaca/diabetes-prediction-using-neural-networks-r]  
+- Kaggle Notebook: [Diabetes Prediction on Kaggle](https://www.kaggle.com/code/robertonicolsbaca/diabetes-prediction-using-neural-networks-r)  
 
 © 2025 Roberto Baca
