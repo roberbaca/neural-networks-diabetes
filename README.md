@@ -35,7 +35,7 @@ The workflow covers:
 
 ## Project Report
 
-You can view the full analysis here: [Neural Networks Diabetes](link-to-your-prettydoc-html)
+You can view the full analysis here: [Neural Networks Diabetes]([link-to-your-prettydoc-html](https://roberbaca.github.io/neural-networks-diabetes/))
 
 ## How to Run
 
